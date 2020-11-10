@@ -1,0 +1,981 @@
+---
+title: "2nd Assignment - Tanzania Water Pump"
+output: N/A
+  html_document: N/A
+    toc: true
+    toc_depth: 3
+author: VLG
+---
+
+# Load Required Libraries
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(ggplot2)
+library(stringr)
+library(plyr)
+library(dplyr)     # To compute the `union` of the levels
+library(png)       # To include images in this document
+library(knitr)     # To include images inline in this document
+library(moments)   # Skewness
+library(e1071)     # Alternative for Skewness
+library(glmnet)    # Lasso
+library(caret)     # To enable Lasso training with CV.
+#library(FSelector) # To compute Information Gain
+#library(dummies)   # For dummification
+library(data.table)
+
+#Other libraries will be added in the middle of this R Markdown file on a per-needed basis.
+```
+
+# Introduction
+
+Clean, drinkable water is an important public health issue throughout Africa and more so in the region of Sub-Saharan Africa where Tanzania is the fourth most populous country. While the country has seen a positive GDP growth of 6.5 percent per annum over the past 15 years, (World Bank report) 40 percent of its population lack access to an improved water source. Besides the study conducted by the World Bank, Tanzania has missed to meet the targets of the United Nation's Milenium Development Goal (MDGs) set out until 2015 and to further make this situation more important, UN's Sustainable Development Goals (SDGs) aim to further improve universal access to safe water by 2030.
+
+
+# What is my goal?
+
+Therefore, this Machine Learning projects instends to help Tanzania reach these goals by predicting which water pumps and water sources to fix found in the region. All dataset herein is downloaded from the "Pump it Up: Data Mining the Water Table" hosted on DriveData site. In predicting the future maintainence of these water pumps, more visibility to the problem can come from the results and advise the Tanzanian government to act according and efficiently using these predictions set out by using Machine Learning techniques.
+
+# Data Reading and preparation
+
+```{r Load Data}
+original_training_data = read.csv(
+  file = file.path("D:/MBD/Project_Files/Water_Pump/water_pump_train_data.csv"))
+
+original_training_data_labels = read.csv(
+  file = file.path("D:/MBD/Project_Files/Water_Pump/water_pump_train_labels.csv"))
+
+original_test_data = read.csv(
+  file = file.path("D:/MBD/Project_Files/Water_Pump/water_pump_test_data.csv"))
+
+```
+
+# Join Train and Test dataset, to avoid performing the data cleaning twice
+
+```{r Joinning datasets}
+
+# Combine train dataset with labels dataset
+train_merged <- merge(original_training_data, original_training_data_labels, by = "id", all.x = TRUE)
+
+# Create status_group column in test dataset
+original_test_data$status_group <- ''
+
+# Combine train and test datasets
+dataset <- rbind(train_merged, original_test_data)
+
+```
+
+
+# Let's now visualize the dataset to see where to begin
+
+```{r Dataset Visualization(Overlook)}
+
+View(dataset)
+summary(dataset)
+str(dataset)
+
+```
+
+We can see some problems just by taking a look to the summary: the dataset has missing values, there are some categorical columns codified as numeric, it has different scales for the feature values.
+
+
+# Data Cleaning
+
+We remove meaningless features and incomplete cases.
+```{r NA transformation}
+
+# Remove non-informative features
+#dataset <- dataset[,-which(names(dataset) == "id")]
+
+# Displaying columns with zero  values.
+na.cols <- which(colSums(dataset == 0 | dataset == '') > 0)
+paste('There are', length(na.cols), 'columns with zero values')
+sort(colSums(dataset[na.cols]==0 | dataset[na.cols]==''), decreasing = TRUE)
+
+# These features have a significant amount of missing/zero vales, so we remove them
+dataset$num_private <- NULL
+dataset$amount_tsh <- NULL
+dataset$gps_height <- NULL
+
+# Remove the following features because they have too many levels
+#dataset$subvillage  <- NULL
+dataset$ward  <- NULL
+dataset$scheme_name  <- NULL
+dataset$wpt_name  <- NULL
+
+# population:  we can infere the value from the median of the correspondent region
+dataset$population[dataset$population==0] <- median(dataset$population)
+
+# construction_year: we can infere the value from the median of the correspondent region
+dataset$construction_year[dataset$construction_year==0] <- median(dataset$construction_year)
+
+# installer: impute empty values with "None"
+dataset$installer = factor(dataset$installer, levels=c(levels(dataset$installer), "None"))
+dataset$installer[dataset$installer == 0 | dataset$installer == ''] = "None"
+
+# funder: impute empty values with "None"
+dataset$funder[dataset$funder == 0 | dataset$funder == ''] = "None"
+
+# scheme_management: impute empty values with "None"
+dataset$scheme_management[dataset$scheme_management == 0 | dataset$scheme_management == ''] = "None"
+
+# scheme_management: reduce factor levels since there are factors that are a very low proportion
+prop.table(table(dataset$scheme_management))
+dataset$scheme_management[dataset$scheme_management=="None"]<-"Other"
+dataset$scheme_management[dataset$scheme_management=="SWC"]<-"Other"
+dataset$scheme_management[dataset$scheme_management=="Trust"]<-"Other"
+dataset$scheme_management[dataset$scheme_management=="unknown"]<-"Other"
+dataset$scheme_management<-droplevels(dataset$scheme_management)
+prop.table(table(dataset$scheme_management))
+
+# public_meeting: impute empty values with "None"
+dataset$public_meeting = factor(dataset$public_meeting, levels=c(levels(dataset$public_meeting), "None"))
+dataset$public_meeting[dataset$public_meeting == 0 | dataset$public_meeting == ''] = "None"
+
+# permit: impute empty values with "None"
+dataset$permit = factor(dataset$permit, levels=c(levels(dataset$permit), "None"))
+dataset$permit[dataset$permit == 0 | dataset$permit == ''] = "None"
+
+# subvillage: impute empty values with "None"
+dataset$subvillage = factor(dataset$subvillage, levels=c(levels(dataset$subvillage), "None"))
+dataset$subvillage[dataset$subvillage == 0 | dataset$subvillage == ''] = "None"
+
+# region_code: remove, looks like a proxy for region
+dataset$region_code  <- NULL
+
+# funder: reduce factor levels
+NUM_LEVELS_FUNDER = 10 #Funder will have this many + 1 levels
+funderNames <- names(summary(dataset$funder)[1:NUM_LEVELS_FUNDER])
+funder <- factor(dataset$funder, levels=c(funderNames, "Other"))
+funder[is.na(funder)] <- "Other"
+dataset$funder <- funder
+
+funder <- factor(dataset$funder, levels=c(funderNames, "Other"))
+funder[is.na(funder)] <- "Other"
+dataset$funder <- funder
+ 
+# installer: reduce factor levels
+NUM_LEVELS_INSTALLER = 10 #Installer will have this many + 1 levels
+installerNames <- names(summary(dataset$installer)[1:NUM_LEVELS_INSTALLER])
+installer <- factor(dataset$installer, levels=c(installerNames, "Other"))
+installer[is.na(installer)] <- "Other"
+dataset$installer <- installer
+
+installer <- factor(dataset$installer, levels=c(installerNames, "Other"))
+installer[is.na(installer)] <- "Other"
+dataset$installer <- installer
+
+# recorded_by: remove because it is a constant
+dataset$recorded_by  <- NULL
+
+
+# extraction_type: reduce factor levels since there are factors that are a very low proportion 
+prop.table((table(dataset$extraction_type)))
+dataset$extraction_type[dataset$extraction_type=="other - mkulima/shinyanga"] <- "other"
+dataset$extraction_type <- factor(as.character(dataset$extraction_type))
+prop.table((table(dataset$extraction_type)))
+
+# extraction_type_class: reduce factor levels since there are factors that are a very low proportion
+prop.table((table(dataset$extraction_type_class)))
+dataset$extraction_type_class[dataset$extraction_type_class=="rope pump"] <- "other"
+dataset$extraction_type_class[dataset$extraction_type_class=="wind-powered"] <- "other"
+dataset$extraction_type_class<-droplevels(dataset$extraction_type_class)
+prop.table((table(dataset$extraction_type_class)))
+
+# waterpoint_type_group: reduce factor levels since there are factors that are a very low proportion
+prop.table(table(dataset$waterpoint_type_group))
+dataset$waterpoint_type_group[dataset$waterpoint_type_group=="cattle trough"] <- "other"
+dataset$waterpoint_type_group[dataset$waterpoint_type_group=="dam"] <- "other"
+dataset$waterpoint_type_group[dataset$waterpoint_type_group=="improved spring"] <- "other"
+dataset$waterpoint_type_group<-droplevels(dataset$waterpoint_type_group)
+prop.table((table(dataset$waterpoint_type_group)))
+
+
+```
+
+
+```{r}
+
+#longitude = 0 is probably missing values, so impute with mean of that region
+longsummary <- aggregate(longitude~region,data=dataset[(dataset$longitude!=0),], FUN=mean)
+str(longsummary)
+print(longsummary)
+
+meanlong <- mean(dataset$longitude[dataset$longitude!=0])
+meanlong
+
+# Source: https://github.com/aratikrishna/Waterpump/blob/master/WaterPumpsForest.R
+
+dataset$findatasetongitude<-dataset$longitude
+nrow(dataset[dataset$findatasetongitude==0,])
+
+dataset$findatasetongitude[dataset$region=="Arusha" & dataset$longitude==0] <- 36.55407
+dataset$findatasetongitude[dataset$region=="Dar es Salaam" & dataset$longitude==0] <- 39.21294
+dataset$findatasetongitude[dataset$region=="Dodoma" & dataset$longitude==0] <- 36.04196
+dataset$findatasetongitude[dataset$region=="Iringa" & dataset$longitude==0] <- 34.89592
+dataset$findatasetongitude[dataset$region=="Kagera" & dataset$longitude==0] <- 31.23309
+dataset$findatasetongitude[dataset$region=="Kigoma" & dataset$longitude==0] <- 30.21889
+dataset$findatasetongitude[dataset$region=="Kilimanjaro" & dataset$longitude==0] <- 37.50546
+dataset$findatasetongitude[dataset$region=="Lindi" & dataset$longitude==0] <- 38.98799
+dataset$findatasetongitude[dataset$region=="Manyara" & dataset$longitude==0] <- 35.92932
+dataset$findatasetongitude[dataset$region=="Mara" & dataset$longitude==0] <- 34.15698
+dataset$findatasetongitude[dataset$region=="Mbeya" & dataset$longitude==0] <- 33.53351
+dataset$findatasetongitude[dataset$region=="Morogoro" & dataset$longitude==0] <- 37.04678
+dataset$findatasetongitude[dataset$region=="Mtwara" & dataset$longitude==0] <- 39.38862
+dataset$findatasetongitude[dataset$region=="Mwanza" & dataset$longitude==0] <- 33.09477
+dataset$findatasetongitude[dataset$region=="Pwani" & dataset$longitude==0] <- 38.88372
+dataset$findatasetongitude[dataset$region=="Rukwa" & dataset$longitude==0] <- 31.29116
+dataset$findatasetongitude[dataset$region=="Ruvuma" & dataset$longitude==0] <- 35.72784
+dataset$findatasetongitude[dataset$region=="Shinyanga" & dataset$longitude==0] <- 33.24037
+dataset$findatasetongitude[dataset$region=="Singida" & dataset$longitude==0] <- 373950
+dataset$findatasetongitude[dataset$region=="Tabora" & dataset$longitude==0] <- 32.87830
+dataset$findatasetongitude[dataset$region=="Tanga" & dataset$longitude==0] <- 38.50195
+
+nrow(dataset[dataset$findatasetongitude==0,])
+
+hist(dataset$longitude)
+hist(dataset$findatasetongitude)
+
+
+```
+
+
+# Factorize Features
+
+If we go back to the summary of the dataset we can identify some numerical features that are actually categories, so what we have to do is to convert them to the proper 'class' or 'type' using the `as.factor` command.
+
+```{r factorizing features}
+
+str(dataset)
+
+dataset$longitude <- as.numeric(dataset$longitude)
+dataset$latitude<-as.numeric(dataset$latitude)
+dataset$district_code<-factor(dataset$district_code)
+
+```
+
+
+# Hunting NAs
+
+Counting columns with null values.
+
+```{r NAs discovery}
+
+na.cols <- which(colSums(is.na(dataset)) > 0)
+paste('There are', length(na.cols), 'columns with missing values')
+
+```
+
+
+# Outliers
+
+```{r Outlier detection}
+
+candidate_outliers <- c()
+for (col in names(dataset)) {
+  if (is.numeric(dataset[[col]]) && col != "status_group"){
+    if (length(boxplot.stats(dataset[[col]], coef = 3)$out) > 0){
+      print(ggplot(dataset, aes_string(y=col))+ geom_boxplot(width=0.1, outlier.colour = 'red', outlier.size = 3) + theme(axis.line.x=element_blank(),axis.title.x=element_blank(), axis.ticks.x=element_blank(), axis.text.x=element_blank(),legend.position="none"))
+      candidate_outliers <- c(candidate_outliers, col)
+    }
+  }
+}
+
+```
+
+In order to identify all of these cases and focus only on real outliers, let's plot all the features with outliers against the target variable.
+
+```{r Outlier Detection II}
+for (col in candidate_outliers){
+  plot(dataset$status_group, dataset[[col]], xlab="status_group", ylab = col)
+}
+```
+
+```{r Outlier detection}
+#Identify numerical columns, in order to identify outliers
+numeric <- c();
+for (coln in colnames(dataset)){
+    if(is.numeric(dataset[1449,coln]) == TRUE){
+      numeric <- append(numeric, coln);
+    }
+    else{
+    }
+}
+
+#Select columns containing outliers with coef = 5
+num_variables_containing_outliers <- c();
+for (variable in numeric){
+    if(length(boxplot.stats(dataset[,variable], coef = 5)$out) != 0){
+      num_variables_containing_outliers <- append(num_variables_containing_outliers, variable);
+    }
+    else{ }
+}
+
+#Plot each variable against Status Group
+for (variable in num_variables_containing_outliers){
+  plot(dataset[,variable], dataset[,"status_group"], type="p", xlab=variable)
+}
+
+```
+
+```{r Outlier removal}
+
+# After feature engineering the dataset, the only outlier is population. However, We will not remove any outliers since there are none that are outstanding based on our analysis.
+
+```
+
+
+
+## Categorical to Rankng
+
+There are some categories which are clearly a ranking (they goes from None to Excellent for instance).
+If we leave them as categories (factors) this ranking is lost. Excellent will have the same weight as None. To codify this ranking, we are going to recode these features as numerical, assigning larger values to higher-ranking categories.
+
+
+In addition to capture their ranking meaning, we are going to create a new binary feature for each one of them to reward good and penalize bad qualities and conditions
+
+
+## Adding new features
+
+
+```{r New variables}
+
+# date_recorded: remove because it has 369 levels and is not very imformative, but add 2 derived features: # of days since Jan 1 2019 and month that it was recorded
+
+date_recorded_offset_days <- as.numeric(as.Date("2019-01-01") - as.Date(dataset$date_recorded))
+date_recorded_month <- factor(format(as.Date(dataset$date_recorded), "%b"))
+dataset <- dataset[, -which(names(dataset) == "date_recorded")]
+dataset <- cbind(dataset, date_recorded_offset_days)
+dataset <- cbind(dataset, date_recorded_month)
+
+
+# Source: https://github.com/aratikrishna/Waterpump/blob/master/WaterPumpsGBM.R
+
+# population: Create 0 or 1 flag for populaton 
+hist(dataset$population)
+dataset$pop01flag <- 0
+dataset$pop01flag[dataset$population ==0]<-1
+table(dataset$pop01flag)
+dataset$population[dataset$population==0]<- round(mean(dataset$population[dataset$population!=0]),digits = 0)
+hist(dataset$population)
+table(dataset$population)
+table(dataset$status_group[dataset$population>5000],dataset$population[dataset$population>5000])
+
+# Population > 10000 does not seem to be indicative of status group, collapse dataset to 10000
+dataset$population[dataset$population>5000]<-5000
+
+# Create age column based on max construction_year
+dataset$age<- max(dataset$construction_year)-dataset$construction_year
+table(dataset$age)
+
+dataset$year0flag<-0
+dataset$year0flag[dataset$age==max(dataset$construction_year)]<-1
+table(dataset$age)
+table(dataset$year0flag)
+dataset$age[dataset$age==max(dataset$construction_year)]<- round(mean(dataset$age[dataset$age!=max(dataset$construction_year)]),digits = 0)
+
+
+```
+
+# Train, test splitting
+
+To facilitate the data cleaning and feature engineering we merged train and test datasets. We now split them again to create our final model.
+
+
+```{r Train test split I}
+
+training_data <- dataset[which(dataset$status_group !=''),]
+test <- dataset[which(dataset$status_group==''),]
+
+```
+
+
+We are going to split the annotated dataset in training and validation for the later evaluation of our regression models
+```{r Train test split II}
+splitdf <- function(dataframe, seed=NULL) {
+  if (!is.null(seed)) set.seed(seed)
+  index <- 1:nrow(dataframe)
+     trainindex <- sample(index, trunc(length(index)/1.5))
+     trainset <- dataframe[trainindex, ]
+     testset <- dataframe[-trainindex, ]
+     list(trainset=trainset,testset=testset)
+ 
+  }
+
+
+splits <- splitdf(training_data)
+training <- splits$trainset
+validation <- splits$testset
+
+```
+
+```{r}
+#Check library environment before running Decision Tree modeling...
+#install.packages("tree")
+#install.packages("randomForest")
+library(tree)
+library(ISLR)
+library(randomForest)
+
+```
+
+# Decision Trees
+
+Using decision tree model for this case is pointless due the following reason:
+
+a) For building a building decision trees require algorithms capable of determining an optimal choice at each node, thus with multiple categorical and quantitative values(almost 20 or so).  
+
+b) a decision tree can be built using only a few of the given column variables but this is equivalent of saying that, the other variables are irrelevant which is an extremely bad assumption.
+
+c) Finally especially when a tree is particularly deep as this one, they are prone to overfitting.
+
+# Therefore, we will run a first Random Forest with some features that we consider important after doing the EDA process.
+```{r Random Forest 1} 
+# Random Forest 1
+
+training_data$status_group <- droplevels(training_data$status_group) 
+model_randomforest <- randomForest(status_group ~ longitude + latitude + 
+                               extraction_type_group + quantity + waterpoint_type + 
+                               construction_year, 
+                                                             data = training_data, importance = TRUE,
+                                                             ntree = 20, nodesize = 3)
+
+## Predict first model using in the training set
+
+pred_randomforest_train <- predict(model_randomforest, training_data)
+ importance(model_randomforest)
+ confusionMatrix(pred_randomforest_train, training_data$status_group)
+ 
+#variables importance
+ importance(model_randomforest)
+ varImpPlot(model_randomforest)
+ 
+# # Predict using the test values
+ pred_randomforest_test <- predict(model_randomforest, test) 
+
+```
+
+# Now, we will run a second Random Forest wich includes some variables such as "water_quality" and "installer" that we consider important for the prediction of the dependent variable.
+```{r Random Forest 2}
+
+model_randomforest_2 <- randomForest(as.factor(status_group) ~ longitude + latitude + 
+                                                     extraction_type_group + quantity + waterpoint_type + 
+                                                                   construction_year + installer + population + water_quality,
+                                                                data = training_data, importance = TRUE,
+                                                                ntree = 20, nodesize = 3,
+                                                                seed = 35, do.trace=30)
+                                  
+
+## Predict second random forest using the training values
+pred_randomforest_train_2 <- predict(model_randomforest_2, training_data)
+importance(model_randomforest_2)
+confusionMatrix(pred_randomforest_train_2, training_data$status_group)
+  
+##   Predict using the test values
+
+levels(test$installer) = levels(training_data$installer)  
+
+pred_randomforest_test_2 <- predict(model_randomforest_2, test)
+ 
+```
+
+
+# We develop a third random forest that includes new variables such as "population"" and "permit" increasing the performance of the model. 
+```{r Random Forest 3}
+model_randomforest_3 <- randomForest(as.factor(status_group) ~ longitude + latitude + 
+                               extraction_type_group + quantity + waterpoint_type + 
+                               installer + population + water_quality + 
+                                   + permit, do.trace=100,
+                                data = training_data, importance = TRUE,
+                                ntree = 40, nodesize = 2,
+                               seed = 35)
+
+## Predict third random forest using the training values
+pred_randomforest_train_3 <- predict(model_randomforest_3, training_data)
+importance(model_randomforest_3)
+confusionMatrix(pred_randomforest_train_3, training_data$status_group)
+  
+## Predict using the test values
+levels(test$installer) = levels(training_data$installer)  
+pred_randomforest_test_3 <- predict(model_randomforest_3, test)
+```
+
+# With the purpose of getting a more accurate prediction we decided to create a random forest and a bayesian logistic regression. We want to leverage its prediction power and improve it with an advance technique. The first step is to dummify the variable "status_group" to compute the logit models and split the sample for the models.
+
+```{r}
+install.packages("arm")
+library(arm)
+ 
+```
+
+```{r Dummy}
+# Dummify the "status_group"
+training_data$functional <- as.factor(ifelse(training_data$status_group=='functional',1,0))
+training_data$functional_needs_repair <- as.factor(ifelse(training_data$status_group=='functional needs repair',1,0))
+training_data$non_functional <- as.factor(ifelse(training_data$status_group=='non functional',1,0))
+
+# The next step is to create three Bayesian models for the different categories that we find in the target variable "status_group".
+
+bayesian_functional <- train(functional ~ longitude + latitude +
+                                 extraction_type_group + quantity + waterpoint_type + 
+                                  installer + population + water_quality + 
+                                  permit, method = "bayesglm",data=training_data)
+ 
+ 
+ 
+bayesian_functional_needs_repair <- train(functional_needs_repair ~ longitude + latitude +
+                                 extraction_type_group + quantity + waterpoint_type + 
+                                  installer + population + water_quality + 
+                                  permit, method = "bayesglm",data=training_data)
+ 
+ 
+bayesian_non_functional <- train(non_functional ~ longitude + latitude +
+                                 extraction_type_group + quantity + waterpoint_type + 
+                                  installer + population + water_quality + 
+                                  permit, method = "bayesglm",data=training_data)
+```
+
+# We predict using the training data
+```{r Prediction}
+predicted_functional <- predict(bayesian_functional, training_data)
+predicted_functional_needs_repair <- predict(bayesian_functional_needs_repair, training_data)
+predicted_non_functional <- predict(bayesian_non_functional, training_data)
+ 
+table(training_data$status_group,predicted_functional)
+table(training_data$status_group,predicted_functional_needs_repair)
+table(training_data$status_group,predicted_non_functional)
+```
+
+# We combine the results of the three predictions
+```{r Bayesian Optimization} 
+training_bayesian <- cbind(training_data, predicted_functional, predicted_functional_needs_repair, predicted_non_functional)
+```
+
+```{r Data Split}
+splitdf <- function(dataframe, seed=NULL) {
+  if (!is.null(seed)) set.seed(seed)
+  index <- 1:nrow(dataframe)
+     trainindex <- sample(index, trunc(length(index)/1.5))
+     trainset <- dataframe[trainindex, ]
+     testset <- dataframe[-trainindex, ]
+     list(trainset=trainset,testset=testset)
+ 
+  }
+
+splits <- splitdf(training_data, seed=1)
+training <- splits$trainset
+validation <- splits$testset
+
+```
+
+# Now, we create a forth random forest including our bayesian predictions
+```{r Random Forest 4}
+
+model_randomforest_4 <- randomForest(as.factor(status_group) ~ longitude + latitude +
+                                 extraction_type_group + quantity + waterpoint_type + 
+                                  installer + population + water_quality + 
+                                  permit + predicted_functional + predicted_functional_needs_repair + predicted_non_functional, 
+                                do.trace=100,
+                                data = training_bayesian, importance = TRUE,
+                                ntree = 400, nodesize = 2,
+                               seed = 35)
+```
+
+```{r Random Forest 4 Prediction}
+
+## Predict forth random forest using the training values
+pred_randomforest_train_4 <- predict(model_randomforest_4, training_bayesian)
+importance(model_randomforest_4)
+confusionMatrix(pred_randomforest_train_4, training_bayesian$status_group)
+```
+
+```{r Bayesian 4-1 in prepararion for Random Forest 4}
+predicted_bayesian_4_1 <- predict(bayesian_functional, test)
+predicted_bayesian_4_2 <- predict(bayesian_functional_needs_repair, test)
+predicted_bayesian_4_3 <- predict(bayesian_non_functional, test)
+
+test <- cbind(test, predicted_functional= predicted_bayesian_4_1 , predicted_functional_needs_repair=predicted_bayesian_4_2, predicted_non_functional=predicted_bayesian_4_3 )
+
+```
+
+
+```{r Test against prediction using Random Forest 4}
+predictions_randomforest_4_testdata <- predict(model_randomforest_4, test)
+```
+
+
+# Now, we have created a 5th Random Forest with some new features that we have found interesting for the purpose of improving the prediction of the model as for instance: "basin", "age", "payment" and "date_recorded_month".
+```{r Random Forest 5}
+
+model_randomforest_5 <- randomForest(as.factor(status_group) ~ longitude + latitude + 
+                                extraction_type_group + quantity + waterpoint_type + 
+                                  installer + population + water_quality + 
+                                   permit + basin + payment + age + date_recorded_month
+                                  + predicted_functional + predicted_functional_needs_repair + predicted_non_functional, 
+                                do.trace=100,
+                                data = training_bayesian, importance = TRUE,
+                                ntree = 400, nodesize = 2,
+                               seed = 35)
+```
+
+
+
+```{r Bayesian Optimization}
+predicted_functional <- predict(bayesian_functional, training_bayesian)
+predicted_functional_needs_repair <- predict(bayesian_functional_needs_repair, training_bayesian)
+predicted_non_functional <- predict(bayesian_non_functional, training_bayesian)
+ 
+table(training_bayesian$status_group,predicted_functional)
+table(training_bayesian$status_group,predicted_functional_needs_repair)
+table(training_bayesian$status_group,predicted_non_functional)
+
+
+```
+
+
+```{r Random Forest 5}
+model_randomforest_5_1 <- randomForest(as.factor(status_group) ~ longitude + latitude + 
+                                extraction_type_group + quantity + waterpoint_type + 
+                                  installer + population + water_quality + 
+                                   permit + basin  + payment + age + date_recorded_month
+                                  + predicted_functional + predicted_functional_needs_repair + predicted_non_functional, 
+                                do.trace=100,
+                                data = training_bayesian, importance = TRUE,
+                                ntree = 400, nodesize = 2,
+                               seed = 35)
+
+```
+
+
+# We compute the predictions in the training data and the importance of the variables
+```{r Random Foreest Prodection 5-1}
+predicted_randomforest_train_5_1 <- predict(model_randomforest_5_1, training_bayesian)
+importance(model_randomforest_5_1)
+confusionMatrix(predicted_randomforest_train_5_1, training_bayesian$status_group)
+```
+
+# Predict in the test dataset 
+
+```{r Bayesian Optimization 1-3}
+predicted_bayesian_1 <- predict(bayesian_functional, test)
+predicted_bayesian_2 <- predict(bayesian_functional_needs_repair, test)
+predicted_bayesian_3 <- predict(bayesian_non_functional, test)
+
+test <- cbind(test, predicted_functional= predicted_bayesian_1, predicted_functional_needs_repair=predicted_bayesian_2, predicted_non_functional=predicted_bayesian_3 )
+
+```
+
+
+```{r Create Random Forest Predictions (5-1)}
+predictions_randomforest_testdata <- predict(model_randomforest_5_1, test)
+```
+
+
+# Submission of Random Forest Predictions
+```{r Random Forest Submission}
+############################ Submission ###############################
+randomforest_submission <- data.frame(id = test$id, status_group = (predictions_randomforest_testdata))
+colnames(randomforest_submission) <-c("id", "status_group")
+write.csv(randomforest_submission, file = "submissionRF6csv", row.names = FALSE) 
+
+head(randomforest_submission)
+
+```
+
+##### XGBoost #####
+
+While using a decision tree model for a case as complex as this and was not providing too much insight, using Extreme Gradient Boost (xgboost) proved to give better prediction results.
+
+# In order to prove these better results, we will leave the dataset interpretation as-is (before the Desicion Trees modeling and Feature Engineering.
+
+```{r XGBoost}
+#Check environment to start XGBoost
+# install.packages("xgboost")
+library(xgboost)
+library(Matrix)
+library(MatrixModels)
+library(data.table)
+
+# Fitting XGBoost to the Training set
+test<-original_test_data
+
+#Create new column in test
+test$status_group <- 0
+
+#Reload train and label datasets
+train<-original_training_data
+label<-original_training_data_labels
+
+#Subset label so that it only contains the label (target variable)
+label <- subset(label, select = status_group )
+
+#Combine the train and the label data sets
+train<-cbind(train,label)
+
+#Create new status_group column so test and train and same number of columns. 
+#Required when building the model
+train$status_group<-0
+
+#Designate columns as train and test
+train$tst <- 0
+test$tst <- 1
+
+#Combine train and test into one dataset
+data<- rbind(train,test)
+
+#Separate data into train and test set
+data_train <- data[data$tst==0,]
+data_test <- data[data$tst==1,]
+
+#Create test set that doesn't contain the ID column. This was done because the test and train
+#datsets need to have the same number of columns when making predictions.
+#data_test.noID<-subset(data_test, select = -id)
+
+#Remove the id and status group columns from the train dataset. I don't want these columns
+#to affect the the model
+#data_train<-subset(data_train, select = c(-id,-status_group))
+
+#Convert data frames to numeric matrices. Xgboost requires user to enter data as a numeric matrix
+#data_test.noID <- as.matrix(as.data.frame(lapply(data_test.noID, as.numeric)))
+data_test <- as.matrix(as.data.frame(lapply(data_test, as.numeric)))
+data_train <- as.matrix(as.data.frame(lapply(data_train, as.numeric)))
+label<-as.numeric(label$status_group)
+
+#Create a xgb.DMatrix which is the best format to use to create an xgboost model
+train.DMatrix <- xgb.DMatrix(data = data_train,label = label, missing = NA)
+
+#For loop to run model 11 time with different random seeds. Using an ensemble technique such as this
+#improved the model performance
+
+#Set i=2 because the first column is for the id variable
+i=2
+
+#Create data frame to hold the 11 solutions developed by the model
+solution.table<-data.frame(id=data_test[,"id"])
+for (i in 2:12){
+  set.seed(i) #Set seed so that the results are reproducible
+  
+  #Cross validation to determine the number of iterations to run the model.
+  #We tested this model with a variety of parameters to find the most accurate model
+  #Setting nrounds to 10 should provide us with good enough results even with a complex data as this.
+  xgb.tab = xgb.cv(data = train.DMatrix, objective = "multi:softmax", booster = "gbtree",
+                   nrounds = 10, nfold = 4, early.stopping.round = 10, num_class = 4, maximize = FALSE,
+                   evaluation = "merror", eta = .2, max_depth = 12, colsample_bytree = .4)
+  
+  #Create variable that identifies the optimal number of iterations for the model
+  #min.error.idx = which.min(xgb.tab[, test.merror.mean])
+  
+  #Create model using the same parameters used in xgb.cv
+  model <- xgboost(data = train.DMatrix, objective = "multi:softmax", booster = "gbtree",
+                   eval_metric = "merror", nrounds = 10, 
+                   num_class = 4,eta = .2, max_depth = 14, colsample_bytree = .4)
+
+  #Predict. Used the data_test.noID because it contained the same number of columns as the train.DMatrix
+  #used to build the model.
+  #predict <- predict(model,data_test.noID)
+  predict <- predict(model,newdata = data_test)
+  
+  #Modify prediction labels to match submission format
+  predict[predict==1]<-"functional"
+  predict[predict==2]<-"functional needs repair"
+  predict[predict==3]<-"non functional"
+  
+  #View prediction
+  table(predict)
+  
+  #Add the solution to column i of the solutions data frame. This creates a data frame with a column for
+  #each prediction set. Each prediction is a vote for that prediction. Next I will count the number of votes
+  #for each prediction as use the element with the most votes as my final solution.
+  solution.table[,i]<-predict
+}
+
+#Count the number of votes for each solution for each row
+solution.table.count<-apply(solution.table,MARGIN=1,table)
+
+#Create a vector to hold the final solution
+predict.combined<-vector()
+
+x=1
+#Finds the element that has the most votes for each prediction row
+for (x in 1:nrow(data_test)){
+  predict.combined[x]<-names(which.max(solution.table.count[[x]]))}
+
+#View the number of predictions for each classification
+table(predict.combined)
+
+#Create solution data frame
+solution<- data.frame(id=data_test[,"id"], status_group=predict.combined)
+
+#View the first five rows of the solution to ensure that it follows submission format rules
+head(solution)
+
+#Create csv submission file
+write.csv(solution, file = "D:/MBD/Project_Files/Water_Pump/Water_solution - xgboost.csv", row.names = FALSE)
+
+```
+
+##### Naive Bayes Model #####
+
+Naive Bayes is a model that leverages the conditional independence assumption and computes the probabilities before classifying. The algorithm has the advantage (similar to the Logistic Regression model (that we'll run shortly) of running quickly and providing a decent result. Within the algorithm we use Laplace smoothing to eliminate the zeros by computing the sum of the logs. The model below is relatively simple but will provide us with a baseline score to compare with other methodologies. The best score achieved was 0.6268.
+
+# Train, test splitting
+
+To facilitate the data cleaning and feature engineering we merged train and test datasets. We now split them again to create our final model.
+
+
+```{r Train test split I}
+
+training_data <- dataset[which(dataset$status_group !=''),]
+test <- dataset[which(dataset$status_group==''),]
+
+```
+
+
+We are going to split the annotated dataset in training and validation for the later evaluation of our regression models
+```{r Train test split II}
+splitdf <- function(dataframe, seed=NULL) {
+  if (!is.null(seed)) set.seed(seed)
+  index <- 1:nrow(dataframe)
+     trainindex <- sample(index, trunc(length(index)/1.5))
+     trainset <- dataframe[trainindex, ]
+     testset <- dataframe[-trainindex, ]
+     list(trainset=trainset,testset=testset)
+ 
+  }
+
+
+splits <- splitdf(training_data)
+training <- splits$trainset
+validation <- splits$testset
+```
+
+```{r Naive Bayes Modeling}
+naive_bayes_model <- naiveBayes(training, training$status_group, laplace = 1)
+probs <- predict(naive_bayes_model, newdata=validation, type = "raw")
+classes <- predict(naive_bayes_model, newdata=validation, type = "class")
+
+probs <- predict(naive_bayes_model, newdata=test, type = "raw")
+classes <- predict(naive_bayes_model, newdata=test, type = "class")
+
+submission <- data.frame(id=original_test_data$id, status_group=classes)
+
+write.csv(submission, file="Tanzania_NaiveBayes.csv", row.names = FALSE)
+```
+
+
+
+```{r Set Environment}
+# for multinom logistic regression
+library(nnet)
+install.packages("FSelector")
+library(FSelector)
+```
+
+# Chi Squared 
+Before we move forward with determining which variables we should determine the level of correlations between the y and x variables. Since the majority of the variables are non-numerical variables, we'll only run the Chi Squared analysis and not Spearman.
+
+```{r Finding the correlation with Chi-Squared Test}
+#library(FSelector)
+chisquared <- data.frame(chi.squared(status_group~., training))
+chisquared$features <- rownames(chisquared)
+# Plot the result, and remove those below the 1st IQR (inter-quartile-range) --aggressive
+par(mfrow=c(1,2))
+boxplot(chisquared$attr_importance)
+bp.stats <- boxplot.stats(chisquared$attr_importance)$stats   # Get the statistics from the boxplot
+
+chisquared.threshold = bp.stats[2]  # This element represent the 1st quartile.
+text(y = bp.stats, labels = bp.stats, x = 1.3, cex=0.7)
+barplot(sort(chisquared$attr_importance), names.arg = chisquared$features, cex.names = 0.6, las=2, horiz = T)
+abline(v=chisquared.threshold, col='red')  # Draw a red line over the 1st IQR
+
+```
+
+##### Logistic Regression with Cross-validation Model #####
+
+We'll use logistic regression and not linear regression. Logistic regression is typically used when building a model where the Y is a categorical variable. In our case, there are three possible outcomes so we'll end up using the multinom library (as opposed to binom for example). 
+
+So why not linear? The biggest reason is that to best leverage a linear regression model our Y (status_group) needs to be measured as a scale or metric variable. That's not the case here as Y only has three potential outcomes, so we know that this isn't a good dataset to run regression analysis.
+
+We actually expect other algorithms to score better but we'll still go forward with Logistic. So why do it? In a real business setting, regression related algoritms are well known and so there's likely to be questions related to it. Being able to say that we ran it, then built a model that wasn't as predictive as other models used. 
+
+Another primary reason is that when taking a model to production, it may be better to give up a little on accuracy in order to gain to implement. Because Logistic is relatively small from a computational perspective compared with XGBoost or Random Forest for example, a business decision might be made to move forward with Logistic as the algorithm.
+
+Our best score using Logistic regression with cross-validation was 0.7319.
+
+#Logistic Regression model
+```{r}
+
+log_regression_model <- multinom(status_group ~                        
+quantity + waterpoint_type + extraction_type + management + district_code + water_quality + payment + basin + latitude + longitude + installer + population + funder, data = training, maxit = 250)
+
+```
+
+
+
+#Confusion Matrix
+```{r}
+
+# confusion matrix - training subset
+confusion_matrix_1 <- table(predict(log_regression_model, training), training$status_group)
+# display: off-diag numbers are mis-classifications
+confusion_matrix_1
+```
+
+# Estimate on the accuracy of the classification
+```{r}
+
+# calculate percentage of accurate classifications
+sum(diag(confusion_matrix_1))/sum(confusion_matrix_1)
+```
+
+#AIC score
+```{r}
+
+log_regression_model$AIC
+
+```
+
+
+# Which variables are the most important
+
+```{r}
+
+## Check variable importance:
+
+importance <- varImp(log_regression_model)
+importance <- importance[order(importance$Overall,decreasing = TRUE), ,drop = FALSE]
+print(importance)
+
+```
+
+
+# Validation 
+```{r}
+train_control_1 <- trainControl(method = "repeatedcv", number = 5, repeats = 2)
+
+log_reg_fitted <- multinom(status_group ~                        
+quantity + waterpoint_type + extraction_type + management + district_code + water_quality + payment + basin + latitude + longitude + installer + population + date_recorded_offset_days + funder, data = training_data, method = "multinom", maxit = 250, trControl=train_control_1, preProcess = c("center", "scale"), tuneLength = 10)
+
+```
+
+
+# Validation predictions  
+```{r}
+
+probs <- predict(log_reg_fitted, newdata=validation, type = "prob")
+classes <- predict(log_reg_fitted, newdata=validation, type = "class")
+
+```
+
+# Submission
+```{r}
+
+probs <- predict(log_reg_fitted, newdata=test, type = "prob")
+classes <- predict(log_reg_fitted, newdata=test, type = "class")
+
+submission <- data.frame(id=test$id, status_group=classes)
+
+write.csv(submission, file="Tanzania_Log_Reg.csv", row.names = FALSE)
+
+```
